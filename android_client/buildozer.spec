@@ -10,6 +10,9 @@ package.domain = com.remotectrl
 # 应用版本
 version = 1.0.0
 
+# 源代码目录
+source.dir = .
+
 # 支持的源文件
 source.include_exts = py,png,jpg,kv,atlas,json,ttf
 
