@@ -8,8 +8,6 @@ on:
   workflow_dispatch:
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
   ANDROID_HOME: /opt/android-sdk
   ANDROID_SDK_ROOT: /opt/android-sdk
   JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
@@ -33,11 +31,19 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Cache Android SDK
-        uses: actions/cache@v4
-        with:
-          path: /opt/android-sdk
-          key: android-sdk-${{ runner.os }}-v1
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev \
+            libgles2-mesa-dev \
+            libgbm-dev \
+            libwayland-dev \
+            xclip \
+            zipalign \
+            openjdk-17-jdk \
+            wget \
+            unzip
 
       - name: Install Android SDK
         run: |
@@ -49,38 +55,59 @@ jobs:
           rm cmdline-tools.zip
           
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" > /dev/null 2>&1
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgl1-mesa-dev \
-            libgles2-mesa-dev \
-            libgbm-dev \
-            libwayland-dev \
-            xclip \
-            zipalign \
-            openjdk-17-jdk
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" 2>&1 | tail -10
 
       - name: Install Python dependencies
         working-directory: android_client
         run: |
-          pip install --upgrade pip wheel setuptools
-          pip install -r requirements.txt
-          pip install buildozer==1.5.0
+          pip install --upgrade pip wheel setuptools 2>&1 | tail -5
+          pip install -r requirements.txt 2>&1 | tail -10
+          pip install buildozer==1.5.0 2>&1 | tail -5
 
       - name: Build APK
         working-directory: android_client
         run: |
-          buildozer android debug
+          buildozer android debug 2>&1 | tee build.log
         continue-on-error: true
 
-      - name: List build output
-        if: success()
+      - name: Show build log
+        if: failure()
         working-directory: android_client
         run: |
-          ls -la bin/ || echo "No bin directory"
+          echo "=== Build Log (last 50 lines) ==="
+          tail -50 build.log 2>/dev/null || echo "No build.log found"
+
+      - name: Show .buildozer directory
+        working-directory: android_client
+        run: |
+          echo "=== .buildozer directory ==="
+          ls -la .buildozer/ 2>/dev/null || echo "No .buildozer directory"
+
+      - name: Show buildozer logs
+        working-directory: android_client
+        run: |
+          echo "=== Buildozer logs ==="
+          ls -la ~/.buildozer/logs/ 2>/dev/null || echo "No logs directory"
+          cat ~/.buildozer/logs/*.log 2>/dev/null | tail -100 || echo "No logs"
+
+      - name: List build output
+        working-directory: android_client
+        run: |
+          echo "=== bin directory ==="
+          ls -la bin/ 2>/dev/null || echo "No bin directory"
+          echo "=== All files ==="
+          find . -name "*.apk" 2>/dev/null
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            android_client/build.log
+            android_client/.buildozer/**/*.log
+            ~/.buildozer/logs/*.log
+          retention-days: 7
 
       - name: Upload APK
         if: success()
@@ -89,13 +116,3 @@ jobs:
           name: remotecontrol-apk
           path: android_client/bin/*.apk
           retention-days: 30
-
-      - name: Upload build logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: |
-            android_client/.buildozer/**/*.log
-            ~/.buildozer/logs/*.log
-          retention-days: 7
