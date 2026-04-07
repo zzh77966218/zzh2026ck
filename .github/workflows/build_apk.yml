@@ -55,60 +55,48 @@ jobs:
           rm cmdline-tools.zip
           
           # 自动接受所有license
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" 2>&1 | tail -10
-          
-          # 设置环境变量让buildozer也接受license
-          export ANDROID_SDK_ROOT=$ANDROID_HOME
-          export ANDROID_HOME=$ANDROID_HOME
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses --sdk_root=$ANDROID_HOME
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" "ndk;25b"
 
       - name: Install Python dependencies
         working-directory: android_client
         run: |
-          pip install --upgrade pip wheel setuptools 2>&1 | tail -5
-          pip install cython 2>&1 | tail -5
-          pip install -r requirements.txt 2>&1 | tail -10
-          pip install buildozer==1.5.0 2>&1 | tail -5
+          pip install --upgrade pip wheel setuptools
+          pip install cython
+          pip install -r requirements.txt
+          pip install buildozer==1.5.0
+
+      - name: Configure buildozer to use pre-installed SDK
+        run: |
+          # 创建 buildozer 配置让它使用预安装的 SDK
+          mkdir -p /home/runner/.buildozer
+          cat > /home/runner/.buildozer/android.properties << 'EOF'
+          sdk.dir=/opt/android-sdk
+          ndk.dir=/opt/android-sdk/ndk/25b
+          EOF
 
       - name: Build APK
         working-directory: android_client
         env:
-          ANDROID_SDK_ROOT: /home/runner/.buildozer/android/platform/android-sdk
-          ANDROID_HOME: /home/runner/.buildozer/android/platform/android-sdk
+          ANDROID_HOME: /opt/android-sdk
+          ANDROID_SDK_ROOT: /opt/android-sdk
         run: |
-          # 自动接受所有Android SDK license
-          yes | /home/runner/.buildozer/android/platform/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses --sdk_root=/home/runner/.buildozer/android/platform/android-sdk 2>/dev/null || true
+          # 确保license被接受
+          yes | /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses --sdk_root=/opt/android-sdk 2>/dev/null || true
           
           buildozer android debug 2>&1 | tee build.log
         continue-on-error: true
 
       - name: Show build log
         if: failure()
-        working-directory: android_client
         run: |
-          echo "=== Build Log (last 50 lines) ==="
-          tail -50 build.log 2>/dev/null || echo "No build.log found"
-
-      - name: Show .buildozer directory
-        working-directory: android_client
-        run: |
-          echo "=== .buildozer directory ==="
-          ls -la .buildozer/ 2>/dev/null || echo "No .buildozer directory"
-
-      - name: Show buildozer logs
-        working-directory: android_client
-        run: |
-          echo "=== Buildozer logs ==="
-          ls -la ~/.buildozer/logs/ 2>/dev/null || echo "No logs directory"
-          cat ~/.buildozer/logs/*.log 2>/dev/null | tail -100 || echo "No logs"
+          echo "=== Build Log (last 100 lines) ==="
+          tail -100 android_client/build.log 2>/dev/null || echo "No build.log found"
 
       - name: List build output
-        working-directory: android_client
         run: |
           echo "=== bin directory ==="
-          ls -la bin/ 2>/dev/null || echo "No bin directory"
-          echo "=== All files ==="
-          find . -name "*.apk" 2>/dev/null
+          ls -la android_client/bin/ 2>/dev/null || echo "No bin directory"
 
       - name: Upload build logs
         if: always()
