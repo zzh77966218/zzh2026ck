@@ -61,6 +61,7 @@ jobs:
         working-directory: android_client
         run: |
           pip install --upgrade pip wheel setuptools 2>&1 | tail -5
+          pip install cython 2>&1 | tail -5
           pip install -r requirements.txt 2>&1 | tail -10
           pip install buildozer==1.5.0 2>&1 | tail -5
 
