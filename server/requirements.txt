@@ -1,0 +1,7 @@
+# 远程控制服务器端依赖
+mss>=6.1.0
+numpy>=1.21.0
+pyautogui>=0.9.54
+Pillow>=9.0.0
+pyinstaller>=5.0
+qrcode>=7.0

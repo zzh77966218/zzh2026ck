@@ -1,0 +1,5 @@
+# 远程控制Android客户端依赖
+kivy>=2.1.0
+kivymd>=1.1.0
+pillow>=9.0.0
+pyzbar>=0.1.9
