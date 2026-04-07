@@ -54,8 +54,13 @@ jobs:
           mv cmdline-tools latest
           rm cmdline-tools.zip
           
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+          # 自动接受所有license
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" 2>&1 | tail -10
+          
+          # 设置环境变量让buildozer也接受license
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          export ANDROID_HOME=$ANDROID_HOME
 
       - name: Install Python dependencies
         working-directory: android_client
@@ -67,7 +72,13 @@ jobs:
 
       - name: Build APK
         working-directory: android_client
+        env:
+          ANDROID_SDK_ROOT: /home/runner/.buildozer/android/platform/android-sdk
+          ANDROID_HOME: /home/runner/.buildozer/android/platform/android-sdk
         run: |
+          # 自动接受所有Android SDK license
+          yes | /home/runner/.buildozer/android/platform/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses --sdk_root=/home/runner/.buildozer/android/platform/android-sdk 2>/dev/null || true
+          
           buildozer android debug 2>&1 | tee build.log
         continue-on-error: true
 
