@@ -39,6 +39,7 @@ from kivy.uix.widget import Widget
 from kivy.properties import ObjectProperty, StringProperty, BooleanProperty, NumericProperty
 from kivy.graphics import Color, Rectangle, Ellipse
 from kivy.graphics.texture import Texture
+from kivy.graphics.vertex_instructions import RoundedRectangle
 from kivy.clock import Clock
 from kivy.cache import Cache
 from kivy.logger import Logger
@@ -121,31 +122,40 @@ class ConnectionManager:
         self.host_id = None
         self.viewer_id = None
         self.client_name = "Android"
+        self.lock = threading.RLock()
         
-    def connect_register(self, host, port):
+    def connect_register(self, host, port, timeout=10):
         """连接注册服务器"""
         try:
             self.register_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.register_sock.settimeout(10)
+            self.register_sock.settimeout(timeout)
             self.register_sock.connect((host, port))
             
             # 发送注册请求
-            reg_data = {"name": self.client_name}
+            reg_data = {"name": self.client_name, "type": "mobile"}
             self.register_sock.sendall(Protocol.pack(Protocol.MSG_REGISTER, reg_data))
             
             # 接收响应
             msg_type, payload_len = Protocol.unpack_header(self.register_sock)
-            if payload_len:
-                response = Protocol.recv_payload(self.register_sock, payload_len)
-                if response.get("status") == "ok":
-                    self.my_id = response.get("client_id")
-                    self.connected = True
-                    return True, "注册成功"
+            if payload_len is None:
+                return False, "无响应"
             
-            return False, "注册失败"
+            response = Protocol.recv_payload(self.register_sock, payload_len)
+            if response is None:
+                return False, "无法解析响应"
             
+            if response.get("status") == "ok":
+                self.my_id = response.get("client_id")
+                self.connected = True
+                Logger.info(f"ConnectionManager: 注册成功，ID={self.my_id}")
+                return True, "注册成功"
+            else:
+                return False, response.get("message", "注册被拒绝")
+            
+        except socket.timeout:
+            return False, "连接超时"
         except Exception as e:
-            return False, str(e)
+            return False, f"连接错误: {str(e)}"
     
     def get_online_clients(self):
         """获取在线客户端"""
@@ -155,60 +165,78 @@ class ConnectionManager:
             
             self.register_sock.sendall(Protocol.pack(Protocol.MSG_LIST, {}))
             msg_type, payload_len = Protocol.unpack_header(self.register_sock)
-            if payload_len:
-                response = Protocol.recv_payload(self.register_sock, payload_len)
+            if payload_len is None:
+                return []
+            
+            response = Protocol.recv_payload(self.register_sock, payload_len)
+            if response:
                 return response.get("clients", [])
             return []
-        except:
+        except Exception as e:
+            Logger.error(f"ConnectionManager: 获取设备列表失败: {e}")
             return []
     
     def request_connect(self, target_id, password=""):
         """请求连接"""
         try:
+            if not self.register_sock:
+                return {"status": "error", "message": "未连接到注册服务器"}
+            
             request = {"target_id": target_id, "password": password}
             self.register_sock.sendall(Protocol.pack(Protocol.MSG_CONNECT, request))
             
             msg_type, payload_len = Protocol.unpack_header(self.register_sock)
-            if payload_len:
-                response = Protocol.recv_payload(self.register_sock, payload_len)
+            if payload_len is None:
+                return {"status": "error", "message": "无响应"}
+            
+            response = Protocol.recv_payload(self.register_sock, payload_len)
+            if response:
                 return response
             
             return {"status": "error", "message": "无响应"}
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "message": f"请求失败: {str(e)}"}
     
-    def connect_relay(self, host, port, role="viewer"):
+    def connect_relay(self, host, port, role="viewer", timeout=30):
         """连接中继服务器"""
         try:
             self.relay_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.relay_sock.settimeout(30)
+            self.relay_sock.settimeout(timeout)
             self.relay_sock.connect((host, port))
             
             info = {
                 "role": role,
                 "host_id": self.host_id,
-                "viewer_id": self.viewer_id
+                "viewer_id": self.viewer_id or self.my_id
             }
             self.relay_sock.sendall(Protocol.pack(Protocol.MSG_REGISTER, info))
             
             # 等待连接确认
             msg_type, payload_len = Protocol.unpack_header(self.relay_sock)
-            if payload_len:
-                response = Protocol.recv_payload(self.relay_sock, payload_len)
-                if response.get("status") == "ok":
-                    return True
+            if payload_len is None:
+                return False
+            
+            response = Protocol.recv_payload(self.relay_sock, payload_len)
+            if response and response.get("status") == "ok":
+                Logger.info(f"ConnectionManager: 中继连接成功，role={role}")
+                return True
             
             return False
         except Exception as e:
-            Logger.error(f"Relay connect error: {e}")
+            Logger.error(f"ConnectionManager: 中继连接异常: {e}")
             return False
     
     def recv_screen_data(self):
         """接收屏幕数据"""
         try:
+            if not self.relay_sock:
+                return None
+            
+            self.relay_sock.settimeout(5)
             header = self.relay_sock.recv(4)
             if not header or len(header) < 4:
                 return None
+            
             data_len = struct.unpack("!I", header)[0]
             if data_len == 0:
                 return None
@@ -220,7 +248,10 @@ class ConnectionManager:
                     return None
                 data += packet
             return data
-        except:
+        except socket.timeout:
+            return None
+        except Exception as e:
+            Logger.error(f"ConnectionManager: 接收屏幕数据异常: {e}")
             return None
     
     def send_control(self, msg_type, data):
@@ -228,8 +259,10 @@ class ConnectionManager:
         try:
             if self.relay_sock:
                 self.relay_sock.sendall(Protocol.pack(msg_type, data))
+                return True
         except Exception as e:
-            Logger.error(f"Send control error: {e}")
+            Logger.error(f"ConnectionManager: 发送控制指令异常: {e}")
+        return False
     
     def send_screen_request(self):
         """请求屏幕数据"""
@@ -244,13 +277,21 @@ class ConnectionManager:
     def send_scroll(self, clicks):
         self.send_control(Protocol.MSG_MOUSE_SCROLL, {"clicks": int(clicks)})
     
+    def send_key_press(self, key):
+        self.send_control(Protocol.MSG_KEY_PRESS, {"key": key})
+    
+    def send_text(self, text):
+        self.send_control(Protocol.MSG_TEXT_INPUT, {"text": text})
+    
     def heartbeat(self):
         """心跳"""
         try:
             if self.register_sock:
                 self.register_sock.sendall(Protocol.pack(Protocol.MSG_PING, {}))
-        except:
-            pass
+                return True
+        except Exception as e:
+            Logger.error(f"ConnectionManager: 心跳失败: {e}")
+        return False
     
     def disconnect(self):
         """断开连接"""
@@ -267,6 +308,7 @@ class ConnectionManager:
                 self.register_sock = None
         except:
             pass
+        Logger.info("ConnectionManager: 已断开连接")
 
 # ============== 自定义控件 ==============
 class RemoteScreenView(Widget):
@@ -280,6 +322,7 @@ class RemoteScreenView(Widget):
         super().__init__(**kwargs)
         self.touch_callback = None
         self.last_touch_pos = None
+        self.last_touch_id = None
         
         with self.canvas:
             Color(0.15, 0.15, 0.2, 1)
@@ -294,14 +337,27 @@ class RemoteScreenView(Widget):
     def update_texture(self, image_data):
         """更新显示图像"""
         try:
-            if not image_data:
+            if not image_data or len(image_data) == 0:
                 return
                 
             img = Image.open(io.BytesIO(image_data))
-            img = img.convert('RGB')
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
             
-            # 缩放适应
-            img.thumbnail((self.width, self.height), Image.LANCZOS)
+            # 计算缩放比例，保持宽高比
+            max_width = self.width - 20
+            max_height = self.height - 20
+            if max_width <= 0 or max_height <= 0:
+                return
+            
+            scale_w = max_width / img.width
+            scale_h = max_height / img.height
+            scale = min(scale_w, scale_h, 1.0)  # 不放大
+            
+            new_width = int(img.width * scale)
+            new_height = int(img.height * scale)
+            
+            img = img.resize((new_width, new_height), Image.LANCZOS)
             
             # 创建纹理
             buf = img.tobytes('raw', 'RGB')
@@ -310,17 +366,18 @@ class RemoteScreenView(Widget):
             texture.flip_vertical()
             
             self.texture = texture
-            self.remote_width = img.size[0]
-            self.remote_height = img.size[1]
+            self.remote_width = img.width
+            self.remote_height = img.height
             
-            # 绘制
+            # 重新绘制
             self.canvas.clear()
             with self.canvas:
                 Color(1, 1, 1, 1)
-                Rectangle(texture=texture, pos=self.calc_pos(img.size), size=img.size)
+                pos = self.calc_pos((new_width, new_height))
+                Rectangle(texture=texture, pos=pos, size=(new_width, new_height))
                 
         except Exception as e:
-            Logger.error(f"Texture update error: {e}")
+            Logger.error(f"RemoteScreenView: 纹理更新失败: {e}")
     
     def calc_pos(self, img_size):
         """计算居中位置"""
@@ -330,37 +387,45 @@ class RemoteScreenView(Widget):
     
     def get_remote_coords(self, touch_x, touch_y):
         """触摸坐标转换为远程坐标"""
-        if not self.texture:
+        if not self.texture or self.remote_width <= 0 or self.remote_height <= 0:
             return 0, 0
         
-        img_x = touch_x - (self.width - self.remote_width) / 2
-        img_y = touch_y - (self.height - self.remote_height) / 2
+        # 屏幕显示位置
+        img_pos = self.calc_pos((self.remote_width, self.remote_height))
         
-        # 缩放到原始分辨率
-        scale_x = 1920 / self.remote_width if self.remote_width > 0 else 1
-        scale_y = 1080 / self.remote_height if self.remote_height > 0 else 1
+        # 相对于图像的位置
+        img_x = touch_x - (self.pos[0] + img_pos[0])
+        img_y = touch_y - (self.pos[1] + img_pos[1])
         
-        return int(img_x * scale_x), int(img_y * scale_y)
+        # 确保在图像范围内
+        if img_x < 0 or img_y < 0 or img_x >= self.remote_width or img_y >= self.remote_height:
+            return None, None
+        
+        return int(img_x), int(img_y)
     
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos) and self.touch_callback:
             x, y = self.get_remote_coords(touch.x, touch.y)
-            self.touch_callback('down', x, y)
-            self.last_touch_pos = (x, y)
-            return True
+            if x is not None and y is not None:
+                self.last_touch_pos = (x, y)
+                self.last_touch_id = touch.uid
+                self.touch_callback('down', x, y)
+                return True
         return False
     
     def on_touch_move(self, touch):
-        if self.collide_point(*touch.pos) and self.touch_callback:
+        if touch.uid == self.last_touch_id and self.collide_point(*touch.pos) and self.touch_callback:
             x, y = self.get_remote_coords(touch.x, touch.y)
-            self.touch_callback('move', x, y)
-            self.last_touch_pos = (x, y)
-            return True
+            if x is not None and y is not None:
+                self.touch_callback('move', x, y)
+                return True
         return False
     
     def on_touch_up(self, touch):
-        if self.touch_callback:
+        if touch.uid == self.last_touch_id and self.touch_callback:
             self.touch_callback('up', 0, 0)
+            self.last_touch_id = None
+            return True
         return False
 
 # ============== 二维码扫描界面 ==============
@@ -373,6 +438,10 @@ class QRScanScreen(Screen):
         self.scan_camera = None
         self.scan_running = False
         self.scan_event = None
+        
+        # 创建并添加布局
+        layout = self.create_scan_layout()
+        self.add_widget(layout)
         
     def on_enter(self):
         """进入界面时启动摄像头"""
@@ -572,9 +641,9 @@ class QRScanScreen(Screen):
 class HomeScreen(Screen):
     """主界面"""
     
-    def __init__(self, **kwargs):
+    def __init__(self, app, **kwargs):
         super().__init__(**kwargs)
-        self.app = App.get_running_app()
+        self.app = app
 
 # ============== 主应用 ==============
 class RemoteLinkApp(App):
@@ -603,18 +672,19 @@ class RemoteLinkApp(App):
         self.screen_manager = ScreenManager()
         
         # 主页面
-        self.home_screen = HomeScreen(name='home')
-        self.home_screen.add_widget(self.create_home_layout())
+        self.home_screen = HomeScreen(app=self, name='home')
+        home_layout = self.create_home_layout()
+        self.home_screen.add_widget(home_layout)
         self.screen_manager.add_widget(self.home_screen)
         
         # 控制页面
         self.control_screen = Screen(name='control')
-        self.control_screen.add_widget(self.create_control_layout())
+        ctrl_layout = self.create_control_layout()
+        self.control_screen.add_widget(ctrl_layout)
         self.screen_manager.add_widget(self.control_screen)
         
         # 扫描页面
         self.scan_screen = QRScanScreen(name='scan')
-        self.scan_screen.add_widget(self.scan_screen.create_scan_layout())
         self.screen_manager.add_widget(self.scan_screen)
         
         return self.screen_manager
@@ -883,57 +953,78 @@ class RemoteLinkApp(App):
     
     def screen_receive_loop(self):
         """屏幕接收循环"""
+        last_request_time = 0
+        request_interval = 0.1  # 100ms请求一次
+        
         while self.connected_to_host and self.connection.relay_sock:
             try:
+                current_time = time.time()
+                # 定期请求屏幕数据
+                if current_time - last_request_time >= request_interval:
+                    self.connection.send_screen_request()
+                    last_request_time = current_time
+                
+                # 接收屏幕数据
                 screen_data = self.connection.recv_screen_data()
                 if screen_data:
                     Clock.schedule_once(lambda dt, d=screen_data: 
                                        self.remote_screen.update_texture(d))
+                    self.ctrl_status.text = '已连接'
+                    self.ctrl_status.color = [0, 1, 0.5, 1]
                 else:
+                    # 短暂延迟避免busy loop
                     time.sleep(0.05)
+                    
             except Exception as e:
-                Logger.error(f"Screen receive error: {e}")
+                Logger.error(f"RemoteLinkApp: 屏幕接收异常: {e}")
                 break
         
         Clock.schedule_once(lambda dt: self.on_connection_lost())
     
     def on_touch_event(self, event_type, x, y):
         """触摸事件"""
-        if not self.connected_to_host:
+        if not self.connected_to_host or not self.connection.relay_sock:
             return
         
         if event_type == 'move':
-            threading.Thread(target=self.connection.send_mouse_move,
-                            args=(x, y), daemon=True).start()
+            self.connection.send_mouse_move(x, y)
         elif event_type == 'down':
-            threading.Thread(target=self.connection.send_mouse_move,
-                            args=(x, y), daemon=True).start()
-            threading.Thread(target=self.connection.send_mouse_click,
-                            args=('left',), daemon=True).start()
+            # 发送移动然后点击
+            self.connection.send_mouse_move(x, y)
+            time.sleep(0.05)
+            self.connection.send_mouse_click('left')
+        elif event_type == 'up':
+            pass
     
     def on_control_button(self, action):
         """控制按钮"""
-        if not self.connected_to_host:
+        if not self.connected_to_host or not self.connection.relay_sock:
             return
         
         if action == 'left':
-            threading.Thread(target=self.connection.send_mouse_click,
-                            args=('left',), daemon=True).start()
+            self.connection.send_mouse_click('left')
         elif action == 'right':
-            threading.Thread(target=self.connection.send_mouse_click,
-                            args=('right',), daemon=True).start()
+            self.connection.send_mouse_click('right')
         elif action == 'double':
-            def do_double():
-                self.connection.send_mouse_click('left')
-                time.sleep(0.1)
-                self.connection.send_mouse_click('left')
-            threading.Thread(target=do_double, daemon=True).start()
+            self.connection.send_mouse_click('left')
+            time.sleep(0.1)
+            self.connection.send_mouse_click('left')
     
     def on_connection_lost(self):
         """连接丢失"""
         self.connected_to_host = False
+        
         self.ctrl_status.text = '连接已断开'
-        self.go_home()
+        self.ctrl_status.color = [1, 0.3, 0.3, 1]
+        
+        self.remote_id_label.text = '已断开'
+        
+        # 清理资源
+        self.connection.disconnect()
+        
+        # 2秒后返回主界面
+        time.sleep(2)
+        Clock.schedule_once(lambda dt: self.go_home())
     
     def on_scan_pressed(self, instance):
         """扫码按钮"""
@@ -943,10 +1034,16 @@ class RemoteLinkApp(App):
     def go_home(self):
         """返回主页"""
         self.connected_to_host = False
-        self.connection.disconnect()
+        
+        try:
+            self.connection.disconnect()
+        except:
+            pass
+        
         self.screen_manager.current = 'home'
-        self.status_label.text = '未连接'
+        self.status_label.text = '已断开'
         self.status_label.color = [1, 0.3, 0.3, 1]
+        self.target_id_input.text = ''
 
 # ============== 入口 ==============
 if __name__ == '__main__':

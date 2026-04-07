@@ -16,8 +16,18 @@ import hashlib
 import json
 import qrcode
 import base64
+import logging
 from datetime import datetime
 from uuid import uuid4
+
+# 导入安全模块
+sys.path.insert(0, os.path.dirname(__file__))
+try:
+    from security import PasswordManager, TokenManager, SessionManager, RateLimiter, ChecksumManager
+    HAS_SECURITY = True
+except ImportError:
+    HAS_SECURITY = False
+    print("警告: 未找到security模块，将使用基础认证")
 
 # 屏幕捕获和控制
 try:
@@ -47,6 +57,7 @@ running = False
 clients_registry = {}  # client_id -> {socket, info}
 remote_desktop_sessions = {}  # viewer_id -> (host_id, relay_socket)
 log_callback = None
+registry_lock = threading.RLock()  # 保护注册表的锁
 
 # ============== 心跳检查函数 ==============
 def heartbeat_checker(registered_clients, interval=30, timeout=90):
@@ -56,28 +67,33 @@ def heartbeat_checker(registered_clients, interval=30, timeout=90):
         current_time = time.time()
         disconnected = []
         
-        for client_id, data in registered_clients.items():
-            last_heartbeat = data.get("last_heartbeat", 0)
-            if current_time - last_heartbeat > timeout:
-                disconnected.append(client_id)
+        with registry_lock:
+            for client_id, data in list(registered_clients.items()):
+                last_heartbeat = data.get("last_heartbeat", 0)
+                if current_time - last_heartbeat > timeout:
+                    disconnected.append(client_id)
         
         for client_id in disconnected:
-            if client_id in registered_clients:
-                try:
-                    registered_clients[client_id]["socket"].close()
-                except:
-                    pass
-                del registered_clients[client_id]
-                log(f"心跳超时移除: {client_id}")
+            with registry_lock:
+                if client_id in registered_clients:
+                    try:
+                        registered_clients[client_id]["socket"].close()
+                    except Exception as e:
+                        log(f"关闭超时客户端异常: {e}", "ERROR")
+                    del registered_clients[client_id]
+                    log(f"心跳超时移除: {client_id}")
 
 # ============== 日志系统 ==============
 def log(message, level="INFO"):
     """日志输出"""
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    log_message = f"[{timestamp}] [{level}] {message}"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_message = f"[{timestamp}] [{level:7s}] {message}"
     print(log_message)
     if log_callback:
-        log_callback(log_message)
+        try:
+            log_callback(log_message)
+        except Exception as e:
+            print(f"日志回调异常: {e}")
 
 # ============== ID生成器 ==============
 class IDGenerator:
@@ -99,10 +115,14 @@ class IDGenerator:
 class ScreenCapture:
     """屏幕捕获类"""
     
-    def __init__(self):
-        self.sct = mss.mss()
-        self.monitor = self.sct.monitors[1]
-        self.quality = 50
+    def __init__(self, quality=60):
+        try:
+            self.sct = mss.mss()
+            self.monitor = self.sct.monitors[1]
+            self.quality = quality
+        except Exception as e:
+            log(f"屏幕捕获初始化异常: {e}", "ERROR")
+            raise
         
     def capture(self):
         """捕获屏幕"""
@@ -110,7 +130,8 @@ class ScreenCapture:
             screenshot = self.sct.grab(self.monitor)
             img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
             output = io.BytesIO()
-            img.save(output, format='JPEG', quality=self.quality)
+            # 使用更好的JPEG质量并启用优化
+            img.save(output, format='JPEG', quality=self.quality, optimize=True)
             return output.getvalue()
         except Exception as e:
             log(f"屏幕捕获失败: {e}", "ERROR")
@@ -120,15 +141,16 @@ class ScreenCapture:
         """获取屏幕分辨率"""
         try:
             return self.monitor["width"], self.monitor["height"]
-        except:
+        except Exception as e:
+            log(f"获取屏幕大小异常: {e}", "ERROR")
             return 1920, 1080
     
     def close(self):
         """关闭"""
         try:
             self.sct.close()
-        except:
-            pass
+        except Exception as e:
+            log(f"关闭屏幕捕获异常: {e}", "ERROR")
 
 # ============== 输入控制 ==============
 class InputController:
@@ -139,7 +161,8 @@ class InputController:
         try:
             pyautogui.moveTo(int(x), int(y), duration=0)
             return True
-        except:
+        except Exception as e:
+            log(f"鼠标移动异常: {e}", "ERROR")
             return False
     
     @staticmethod
@@ -152,7 +175,8 @@ class InputController:
             elif button == "double":
                 pyautogui.doubleClick()
             return True
-        except:
+        except Exception as e:
+            log(f"鼠标点击异常: {e}", "ERROR")
             return False
     
     @staticmethod
@@ -160,23 +184,35 @@ class InputController:
         try:
             pyautogui.scroll(int(clicks))
             return True
-        except:
+        except Exception as e:
+            log(f"鼠标滚动异常: {e}", "ERROR")
             return False
     
     @staticmethod
     def key_press(key):
         try:
-            pyautogui.press(key)
+            # 特殊键处理
+            special_keys = {
+                'enter': 'return', 'escape': 'esc', 'backspace': 'backspace',
+                'tab': 'tab', 'delete': 'delete', 'home': 'home', 'end': 'end',
+                'pageup': 'pageup', 'pagedown': 'pagedown'
+            }
+            actual_key = special_keys.get(key.lower(), key)
+            pyautogui.press(actual_key)
             return True
-        except:
+        except Exception as e:
+            log(f"按键异常: {e}", "ERROR")
             return False
     
     @staticmethod
     def type_text(text):
         try:
-            pyautogui.write(text, interval=0.01)
+            # 对特殊字符进行处理
+            for char in text:
+                pyautogui.write(char, interval=0.01)
             return True
-        except:
+        except Exception as e:
+            log(f"文本输入异常: {e}", "ERROR")
             return False
 
 # ============== 协议处理 ==============
@@ -235,8 +271,22 @@ class RegisterServer:
         self.port = port
         self.socket = None
         self.registered_clients = {}  # client_id -> {socket, info, last_heartbeat}
-        self.client_passwords = {}     # client_id -> password
+        self.client_passwords = {}     # client_id -> password_hash
         
+        # 初始化安全管理器
+        if HAS_SECURITY:
+            self.token_manager = TokenManager()
+            self.session_manager = SessionManager()
+            self.rate_limiter = RateLimiter(max_requests=100, time_window=60)
+            log("安全模块已加载")
+        else:
+            self.token_manager = None
+            self.session_manager = None
+            self.rate_limiter = None
+            log("安全模块未加载，使用基础认证")
+        
+    # 下面是start方法
+    
     def start(self):
         """启动注册服务器"""
         try:
@@ -251,38 +301,63 @@ class RegisterServer:
                     self.socket.settimeout(1.0)
                     try:
                         client_sock, addr = self.socket.accept()
+                        client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                         threading.Thread(target=self.handle_client, 
-                                       args=(client_sock,), daemon=True).start()
+                                       args=(client_sock,), daemon=True, name=f"Client-{addr}").start()
                     except socket.timeout:
                         continue
                 except Exception as e:
                     if running:
                         log(f"注册服务异常: {e}", "ERROR")
+                    break
         except Exception as e:
             log(f"注册服务启动失败: {e}", "ERROR")
+        finally:
+            self.stop()
     
     def handle_client(self, sock):
         """处理客户端请求"""
         client_id = None
         try:
+            # 获取客户端地址用于速率限制
+            client_addr = sock.getpeername()[0]
+            
+            # 检查速率限制
+            if self.rate_limiter and not self.rate_limiter.check_rate_limit(client_addr):
+                log(f"客户端 {client_addr} 请求过于频繁，拒绝连接", "WARN")
+                sock.close()
+                return
+            
             msg_type, payload_len = Protocol.unpack_header(sock)
             if payload_len is None:
                 return
                 
             payload = Protocol.recv_payload(sock, payload_len)
+            if payload is None:
+                return
             
             if msg_type == Protocol.MSG_REGISTER:
                 # 注册请求
                 client_id = self.register_client(sock, payload)
                 if client_id:
+                    # 生成令牌
+                    token = None
+                    if self.token_manager:
+                        token = self.token_manager.generate_token(client_id)
+                    
                     sock.sendall(Protocol.pack(Protocol.MSG_REGISTER, {
                         "status": "ok",
-                        "client_id": client_id
+                        "client_id": client_id,
+                        "token": token
                     }))
-                    log(f"客户端注册: {client_id} @ {sock.getpeername()}")
                     
                     # 保持连接，处理心跳
                     self.heartbeat_loop(sock, client_id)
+                else:
+                    sock.sendall(Protocol.pack(Protocol.MSG_REGISTER, {
+                        "status": "error",
+                        "message": "ID生成失败"
+                    }))
                     
             elif msg_type == Protocol.MSG_LIST:
                 # 获取在线列表
@@ -310,29 +385,47 @@ class RegisterServer:
     
     def register_client(self, sock, info):
         """注册客户端"""
-        # 生成新ID
-        while True:
+        # 生成新ID（确保不重复）
+        max_attempts = 100
+        for attempt in range(max_attempts):
             client_id = IDGenerator.generate()
-            if client_id not in self.registered_clients:
-                break
+            with registry_lock:
+                if client_id not in self.registered_clients:
+                    self.registered_clients[client_id] = {
+                        "socket": sock,
+                        "info": info,
+                        "last_heartbeat": time.time(),
+                        "address": sock.getpeername()
+                    }
+                    
+                    password = info.get("password", "")
+                    if password and HAS_SECURITY:
+                        # 使用安全的密码哈希
+                        self.client_passwords[client_id] = PasswordManager.hash_password(password)
+                    elif password:
+                        # 降级：使用简单哈希
+                        self.client_passwords[client_id] = hashlib.sha256(password.encode()).hexdigest()
+                    
+                    log(f"新客户端注册：{client_id} @ {sock.getpeername()}")
+                    return client_id
         
-        self.registered_clients[client_id] = {
-            "socket": sock,
-            "info": info,
-            "last_heartbeat": time.time()
-        }
-        
-        password = info.get("password", "")
-        if password:
-            self.client_passwords[client_id] = password
-        
-        return client_id
+        log("无法生成唯一ID（冲突过多）", "ERROR")
+        return None
     
     def unregister_client(self, client_id):
         """注销客户端"""
-        if client_id in self.registered_clients:
-            del self.registered_clients[client_id]
-            log(f"客户端断开: {client_id}")
+        with registry_lock:
+            if client_id in self.registered_clients:
+                try:
+                    self.registered_clients[client_id]["socket"].close()
+                except:
+                    pass
+                del self.registered_clients[client_id]
+        
+        if client_id in self.client_passwords:
+            del self.client_passwords[client_id]
+        
+        log(f"客户端断开: {client_id}")
     
     def heartbeat_loop(self, sock, client_id):
         """心跳维护"""
@@ -343,14 +436,25 @@ class RegisterServer:
                     msg_type, payload_len = Protocol.unpack_header(sock)
                     if payload_len is None:
                         break
+                    
                     payload = Protocol.recv_payload(sock, payload_len)
+                    if payload is None:
+                        break
                     
                     if msg_type == Protocol.MSG_PING:
-                        self.registered_clients[client_id]["last_heartbeat"] = time.time()
+                        with registry_lock:
+                            if client_id in self.registered_clients:
+                                self.registered_clients[client_id]["last_heartbeat"] = time.time()
                         sock.sendall(Protocol.pack(Protocol.MSG_PING, {"status": "ok"}))
+                    
                 except socket.timeout:
+                    log(f"客户端 {client_id} 心跳超时", "WARN")
+                    break
+                except Exception as e:
+                    log(f"心跳循环异常: {e}", "ERROR")
                     break
             except Exception as e:
+                log(f"心跳处理异常: {e}", "ERROR")
                 break
         
         self.unregister_client(client_id)
@@ -358,25 +462,41 @@ class RegisterServer:
     def get_online_clients(self):
         """获取在线客户端"""
         online = []
-        for cid, data in self.registered_clients.items():
-            info = data.get("info", {})
-            online.append({
-                "id": cid,
-                "name": info.get("name", f"设备-{cid}"),
-                "online": True
-            })
+        with registry_lock:
+            for cid, data in list(self.registered_clients.items()):
+                info = data.get("info", {})
+                online.append({
+                    "id": cid,
+                    "name": info.get("name", f"设备-{cid}"),
+                    "online": True
+                })
         return online
     
     def request_connect(self, viewer_id, target_id, password):
         """请求连接"""
-        if target_id not in self.registered_clients:
-            return {"status": "error", "message": "目标不在线"}
+        with registry_lock:
+            if target_id not in self.registered_clients:
+                return {"status": "error", "message": "目标不在线"}
+            
+            target_info = self.registered_clients[target_id]
+            
+            # 验证密码
+            if target_id in self.client_passwords:
+                pwd_hash = self.client_passwords[target_id]
+                
+                # 尝试使用安全验证
+                verified = False
+                if HAS_SECURITY and '$' in pwd_hash:
+                    verified = PasswordManager.verify_password(password, pwd_hash)
+                else:
+                    # 降级：使用简单验证
+                    verified = hashlib.sha256(password.encode()).hexdigest() == pwd_hash
+                
+                if not verified:
+                    log(f"客户端 {viewer_id} 试图连接 {target_id} 时密码错误", "WARN")
+                    return {"status": "error", "message": "密码错误"}
         
-        # 验证密码
-        if target_id in self.client_passwords:
-            if self.client_passwords[target_id] != password:
-                return {"status": "error", "message": "密码错误"}
-        
+        log(f"连接请求: viewer={viewer_id} -> target={target_id}")
         return {
             "status": "ok",
             "relay_port": RELAY_PORT,
@@ -414,19 +534,25 @@ class RelayServer:
                     self.socket.settimeout(1.0)
                     try:
                         client_sock, addr = self.socket.accept()
+                        client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                         threading.Thread(target=self.handle_relay, 
-                                       args=(client_sock,), daemon=True).start()
+                                       args=(client_sock,), daemon=True, name=f"Relay-{addr}").start()
                     except socket.timeout:
                         continue
                 except Exception as e:
                     if running:
                         log(f"中继服务异常: {e}", "ERROR")
+                    break
         except Exception as e:
             log(f"中继服务启动失败: {e}", "ERROR")
+        finally:
+            self.stop()
     
     def handle_relay(self, sock):
         """处理中继连接"""
         try:
+            sock.settimeout(10)
+            
             # 接收连接信息
             msg_type, payload_len = Protocol.unpack_header(sock)
             if payload_len is None:
@@ -434,14 +560,22 @@ class RelayServer:
                 return
             
             info = Protocol.recv_payload(sock, payload_len)
+            if info is None:
+                sock.close()
+                return
+            
             role = info.get("role")  # "host" or "viewer"
             host_id = info.get("host_id")
             viewer_id = info.get("viewer_id")
             
+            if not role or not host_id:
+                log(f"无效的中继连接信息: role={role}, host_id={host_id}", "WARN")
+                sock.close()
+                return
+            
             if role == "host":
                 # 主机等待连接
                 log(f"主机 {host_id} 等待控制连接...")
-                # 存储主机连接
                 self.sessions[host_id] = {"host_sock": sock, "viewer_sock": None}
                 
                 # 等待 viewer 连接
@@ -449,11 +583,22 @@ class RelayServer:
                 
             elif role == "viewer":
                 # viewer 连接
+                if not viewer_id:
+                    log(f"viewer连接缺少viewer_id", "WARN")
+                    sock.close()
+                    return
+                
                 self.connect_viewer(host_id, viewer_id, sock)
+            else:
+                log(f"未知的角色: {role}", "WARN")
+                sock.close()
                 
         except Exception as e:
             log(f"中继处理异常: {e}", "ERROR")
-            sock.close()
+            try:
+                sock.close()
+            except:
+                pass
     
     def wait_for_viewer(self, host_id, viewer_id):
         """等待viewer连接"""
@@ -464,10 +609,12 @@ class RelayServer:
             if host_id in self.sessions and self.sessions[host_id].get("viewer_sock"):
                 log(f"viewer {viewer_id} 已连接 host {host_id}")
                 self.relay_loop(host_id)
-                break
+                return
             time.sleep(0.1)
         
-        if host_id in self.sessions and not self.sessions[host_id].get("viewer_sock"):
+        # 超时处理
+        if host_id in self.sessions:
+            log(f"等待viewer {viewer_id}连接主机{host_id}超时", "WARN")
             try:
                 self.sessions[host_id]["host_sock"].close()
             except:
@@ -477,6 +624,7 @@ class RelayServer:
     def connect_viewer(self, host_id, viewer_id, viewer_sock):
         """连接viewer到主机"""
         if host_id in self.sessions:
+            log(f"viewer {viewer_id} 成功连接到主机 {host_id}")
             self.sessions[host_id]["viewer_sock"] = viewer_sock
             # 通知主机
             try:
@@ -485,10 +633,14 @@ class RelayServer:
                     "status": "ok",
                     "viewer_id": viewer_id
                 }))
+            except Exception as e:
+                log(f"通知主机异常: {e}", "ERROR")
+        else:
+            log(f"主机 {host_id} 不存在，拒绝viewer {viewer_id}的连接", "WARN")
+            try:
+                viewer_sock.close()
             except:
                 pass
-        else:
-            viewer_sock.close()
     
     def relay_loop(self, host_id):
         """中继数据"""
@@ -496,43 +648,58 @@ class RelayServer:
             return
             
         session = self.sessions[host_id]
-        host_sock = session["host_sock"]
-        viewer_sock = session["viewer_sock"]
+        host_sock = session.get("host_sock")
+        viewer_sock = session.get("viewer_sock")
         
         if not host_sock or not viewer_sock:
             return
         
+        # 设置socket为非阻塞模式
+        host_sock.setblocking(False)
+        viewer_sock.setblocking(False)
+        
         # 双向转发
         def forward(src, dst, direction):
-            try:
-                while running:
-                    data = src.recv(BUFFER_SIZE)
+            """转发数据"""
+            buffer_size = BUFFER_SIZE
+            while running and host_id in self.sessions:
+                try:
+                    src.settimeout(1.0)
+                    data = src.recv(buffer_size)
                     if not data:
+                        log(f"中继 {direction} 连接关闭", "INFO")
                         break
-                    dst.sendall(data)
-            except:
-                pass
+                    try:
+                        dst.sendall(data)
+                    except Exception as e:
+                        log(f"转发 {direction} 失败: {e}", "ERROR")
+                        break
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    log(f"接收 {direction} 异常: {e}", "ERROR")
+                    break
         
-        t1 = threading.Thread(target=forward, args=(host_sock, viewer_sock, "host->viewer"))
-        t2 = threading.Thread(target=forward, args=(viewer_sock, host_sock, "viewer->host"))
+        t1 = threading.Thread(target=forward, args=(host_sock, viewer_sock, "host->viewer"), daemon=True)
+        t2 = threading.Thread(target=forward, args=(viewer_sock, host_sock, "viewer->host"), daemon=True)
         
-        t1.daemon = True
-        t2.daemon = True
         t1.start()
         t2.start()
         
-        t1.join()
-        t2.join()
+        # 等待任一线程结束
+        t1.join(timeout=300)  # 5分钟超时
+        t2.join(timeout=300)
         
         # 清理
         try:
             host_sock.close()
-        except:
-            pass
+        except Exception as e:
+            log(f"关闭主机套接字异常: {e}", "ERROR")
         try:
             viewer_sock.close()
-        except:
-            pass
+        except Exception as e:
+            log(f"关闭查看器套接字异常: {e}", "ERROR")
+        
         if host_id in self.sessions:
             del self.sessions[host_id]
         
@@ -566,16 +733,22 @@ class RemoteControlHandler:
                 return
                 
             payload = Protocol.recv_payload(self.sock, payload_len)
+            if payload is None:
+                return
             
             if payload.get("status") == "ok":
                 self.viewer_id = payload.get("viewer_id")
                 log(f"viewer {self.viewer_id} 已接管控制")
                 self.init_screen_control()
+            else:
+                log(f"接收到非OK状态: {payload}", "ERROR")
                 
         except Exception as e:
-            log(f"远程控制异常: {e}", "ERROR")
+            log(f"远程控制启动异常: {e}", "ERROR")
         finally:
             self.running = False
+            if self.screen_capture:
+                self.screen_capture.close()
             try:
                 self.sock.close()
             except:
@@ -583,7 +756,11 @@ class RemoteControlHandler:
     
     def init_screen_control(self):
         """初始化屏幕控制"""
-        self.screen_capture = ScreenCapture()
+        try:
+            self.screen_capture = ScreenCapture()
+        except Exception as e:
+            log(f"初始化屏幕捕获失败: {e}", "ERROR")
+            return
         
         while self.running:
             try:
@@ -592,8 +769,13 @@ class RemoteControlHandler:
                     break
                     
                 payload = Protocol.recv_payload(self.sock, payload_len)
+                if payload is None:
+                    break
+                
                 self.handle_command(msg_type, payload)
                 
+            except socket.timeout:
+                pass
             except Exception as e:
                 log(f"控制处理异常: {e}", "ERROR")
                 break
@@ -603,37 +785,54 @@ class RemoteControlHandler:
     
     def handle_command(self, msg_type, payload):
         """处理控制命令"""
-        if msg_type == Protocol.MSG_SCREEN_DATA:
-            # 屏幕截图
-            screen_data = self.screen_capture.capture()
-            if screen_data:
-                header = struct.pack("!I", len(screen_data))
-                self.sock.sendall(header + screen_data)
-            else:
-                self.sock.sendall(struct.pack("!I", 0))
+        try:
+            if msg_type == Protocol.MSG_SCREEN_DATA:
+                # 屏幕截图
+                screen_data = self.screen_capture.capture()
+                if screen_data:
+                    header = struct.pack("!I", len(screen_data))
+                    self.sock.sendall(header + screen_data)
+                else:
+                    self.sock.sendall(struct.pack("!I", 0))
+                    
+            elif msg_type == Protocol.MSG_SCREEN_INFO:
+                # 屏幕信息
+                w, h = self.screen_capture.get_screen_size()
+                self.sock.sendall(Protocol.pack(Protocol.MSG_SCREEN_INFO, {
+                    "width": w,
+                    "height": h
+                }))
                 
-        elif msg_type == Protocol.MSG_SCREEN_INFO:
-            # 屏幕信息
-            w, h = self.screen_capture.get_screen_size()
-            self.sock.sendall(Protocol.pack(Protocol.MSG_SCREEN_INFO, {
-                "width": w,
-                "height": h
-            }))
-            
-        elif msg_type == Protocol.MSG_MOUSE_MOVE:
-            InputController.move_mouse(payload.get("x", 0), payload.get("y", 0))
-            
-        elif msg_type == Protocol.MSG_MOUSE_CLICK:
-            InputController.click(payload.get("button", "left"))
-            
-        elif msg_type == Protocol.MSG_MOUSE_SCROLL:
-            InputController.scroll(payload.get("clicks", 0))
-            
-        elif msg_type == Protocol.MSG_KEY_PRESS:
-            InputController.key_press(payload.get("key", ""))
-            
-        elif msg_type == Protocol.MSG_TEXT_INPUT:
-            InputController.type_text(payload.get("text", ""))
+            elif msg_type == Protocol.MSG_MOUSE_MOVE:
+                x = payload.get("x", 0)
+                y = payload.get("y", 0)
+                # 验证坐标范围
+                if 0 <= x <= 65535 and 0 <= y <= 65535:
+                    InputController.move_mouse(x, y)
+                    
+            elif msg_type == Protocol.MSG_MOUSE_CLICK:
+                button = payload.get("button", "left")
+                if button in ["left", "right", "double"]:
+                    InputController.click(button)
+                    
+            elif msg_type == Protocol.MSG_MOUSE_SCROLL:
+                clicks = int(payload.get("clicks", 0))
+                # 防止输入过度
+                if -10 <= clicks <= 10:
+                    InputController.scroll(clicks)
+                    
+            elif msg_type == Protocol.MSG_KEY_PRESS:
+                key = payload.get("key", "")
+                if len(key) <= 50:  # 限制键字符串长度
+                    InputController.key_press(key)
+                    
+            elif msg_type == Protocol.MSG_TEXT_INPUT:
+                text = payload.get("text", "")
+                if len(text) <= 1000:  # 限制文本长度
+                    InputController.type_text(text)
+                    
+        except Exception as e:
+            log(f"命令处理异常 (type={msg_type}): {e}", "ERROR")
 
 # ============== 主服务器 ==============
 class RemoteControlServer:
@@ -656,44 +855,61 @@ class RemoteControlServer:
             
             # 生成服务器ID
             self.server_id = IDGenerator.generate()
-            log(f"=== 服务器启动 ===")
+            log(f"{'='*50}")
+            log(f"RemoteLink 服务器启动")
+            log(f"{'='*50}")
             log(f"服务器ID: {self.server_id}")
             log(f"注册端口: {self.register_port}")
             log(f"中继端口: {self.relay_port}")
             log(f"本机IP: {self.get_local_ip()}")
+            log(f"{'='*50}")
             
             # 启动注册服务
-            register_thread = threading.Thread(target=self.register_server.start, daemon=True)
+            register_thread = threading.Thread(target=self.register_server.start, daemon=True, name="RegisterServer")
             register_thread.start()
+            time.sleep(0.5)
             
             # 启动心跳检查线程
             heartbeat_thread = threading.Thread(
                 target=heartbeat_checker, 
                 args=(self.register_server.registered_clients, HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL * 3),
-                daemon=True
+                daemon=True,
+                name="HeartbeatChecker"
             )
             heartbeat_thread.start()
+            time.sleep(0.5)
             
             # 启动中继服务
-            relay_thread = threading.Thread(target=self.relay_server.start, daemon=True)
+            relay_thread = threading.Thread(target=self.relay_server.start, daemon=True, name="RelayServer")
             relay_thread.start()
+            time.sleep(0.5)
+            
+            log("所有服务已启动，等待连接...\n")
             
             # 等待
             while running:
                 time.sleep(1)
                 
         except Exception as e:
-            log(f"服务器异常: {e}", "ERROR")
+            log(f"服务器启动异常: {e}", "ERROR")
         finally:
             self.stop()
     
     def stop(self):
         """停止服务器"""
         global running
+        log("正在停止服务器...")
         running = False
         
-        self.register_server.stop()
-        self.relay_server.stop()
+        try:
+            self.register_server.stop()
+        except:
+            pass
+        
+        try:
+            self.relay_server.stop()
+        except:
+            pass
         
         log("服务器已停止")
     

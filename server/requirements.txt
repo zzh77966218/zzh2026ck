@@ -5,3 +5,4 @@ pyautogui>=0.9.54
 Pillow>=9.0.0
 pyinstaller>=5.0
 qrcode>=7.0
+cryptography>=3.4.8  # 用于安全认证（可选）
