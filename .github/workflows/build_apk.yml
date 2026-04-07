@@ -11,6 +11,7 @@ env:
   ANDROID_HOME: /opt/android-sdk
   ANDROID_SDK_ROOT: /opt/android-sdk
   JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+  BUILDZOO_SDK_DIR: /opt/android-sdk
 
 jobs:
   build:
@@ -55,35 +56,55 @@ jobs:
           rm cmdline-tools.zip
           
           # 自动接受所有license
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses --sdk_root=$ANDROID_HOME
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" "ndk;25b"
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses --sdk_root=$ANDROID_HOME 2>/dev/null
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" "ndk;25b" 2>&1 | tail -5
+          
+          # 验证安装
+          ls -la $ANDROID_HOME
 
       - name: Install Python dependencies
-        working-directory: android_client
         run: |
           pip install --upgrade pip wheel setuptools
           pip install cython
           pip install -r requirements.txt
           pip install buildozer==1.5.0
 
-      - name: Configure buildozer to use pre-installed SDK
+      - name: Configure buildozer SDK
         run: |
-          # 创建 buildozer 配置让它使用预安装的 SDK
+          # 关键：创建链接让buildozer找到SDK
+          mkdir -p /home/runner/.buildozer/android/platform
+          
+          # 创建符号链接指向预安装的SDK
+          ln -sf /opt/android-sdk /home/runner/.buildozer/android/platform/android-sdk
+          
+          # 创建buildozer配置
           mkdir -p /home/runner/.buildozer
           cat > /home/runner/.buildozer/android.properties << 'EOF'
-          sdk.dir=/opt/android-sdk
-          ndk.dir=/opt/android-sdk/ndk/25b
-          EOF
+sdk.dir=/opt/android-sdk
+ndk.dir=/opt/android-sdk/ndk/25b
+EOF
+          
+          # 同时设置在用户home目录
+          cat > ~/.buildozer/android.properties << 'EOF'
+sdk.dir=/opt/android-sdk
+ndk.dir=/opt/android-sdk/ndk/25b
+EOF
 
       - name: Build APK
         working-directory: android_client
         env:
           ANDROID_HOME: /opt/android-sdk
           ANDROID_SDK_ROOT: /opt/android-sdk
+          HOME: /home/runner
         run: |
-          # 确保license被接受
+          # 先确保license被接受
           yes | /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses --sdk_root=/opt/android-sdk 2>/dev/null || true
           
+          # 创建local.properties指向我们的SDK
+          echo "sdk.dir=/opt/android-sdk" > local.properties
+          echo "ndk.dir=/opt/android-sdk/ndk/25b" >> local.properties
+          
+          # 运行buildozer
           buildozer android debug 2>&1 | tee build.log
         continue-on-error: true
 
@@ -106,7 +127,6 @@ jobs:
           path: |
             android_client/build.log
             android_client/.buildozer/**/*.log
-            ~/.buildozer/logs/*.log
           retention-days: 7
 
       - name: Upload APK
