@@ -79,16 +79,12 @@ jobs:
           
           # 创建buildozer配置
           mkdir -p /home/runner/.buildozer
-          cat > /home/runner/.buildozer/android.properties << 'EOF'
-sdk.dir=/opt/android-sdk
-ndk.dir=/opt/android-sdk/ndk/25b
-EOF
+          echo "sdk.dir=/opt/android-sdk" > /home/runner/.buildozer/android.properties
+          echo "ndk.dir=/opt/android-sdk/ndk/25b" >> /home/runner/.buildozer/android.properties
           
           # 同时设置在用户home目录
-          cat > ~/.buildozer/android.properties << 'EOF'
-sdk.dir=/opt/android-sdk
-ndk.dir=/opt/android-sdk/ndk/25b
-EOF
+          echo "sdk.dir=/opt/android-sdk" > ~/.buildozer/android.properties
+          echo "ndk.dir=/opt/android-sdk/ndk/25b" >> ~/.buildozer/android.properties
 
       - name: Build APK
         working-directory: android_client
