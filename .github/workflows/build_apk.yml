@@ -71,34 +71,41 @@ jobs:
 
       - name: Configure buildozer SDK
         run: |
-          # 关键：创建链接让buildozer找到SDK
+          # 创建buildozer期望的目录结构
           mkdir -p /home/runner/.buildozer/android/platform
           
-          # 创建符号链接指向预安装的SDK
-          ln -sf /opt/android-sdk /home/runner/.buildozer/android/platform/android-sdk
+          # 移除旧的符号链接
+          rm -rf /home/runner/.buildozer/android/platform/android-sdk
+          
+          # 复制SDK内容而非符号链接，确保buildozer能找到所有文件
+          cp -r /opt/android-sdk /home/runner/.buildozer/android/platform/android-sdk
+          
+          # buildozer需要 tools/bin/sdkmanager，创建兼容链接
+          mkdir -p /home/runner/.buildozer/android/platform/android-sdk/tools/bin
+          ln -sf /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager /home/runner/.buildozer/android/platform/android-sdk/tools/bin/sdkmanager
           
           # 创建buildozer配置
           mkdir -p /home/runner/.buildozer
-          echo "sdk.dir=/opt/android-sdk" > /home/runner/.buildozer/android.properties
-          echo "ndk.dir=/opt/android-sdk/ndk/25b" >> /home/runner/.buildozer/android.properties
+          echo "sdk.dir=/home/runner/.buildozer/android/platform/android-sdk" > /home/runner/.buildozer/android.properties
+          echo "ndk.dir=/home/runner/.buildozer/android/platform/android-sdk/ndk/25b" >> /home/runner/.buildozer/android.properties
           
           # 同时设置在用户home目录
-          echo "sdk.dir=/opt/android-sdk" > ~/.buildozer/android.properties
-          echo "ndk.dir=/opt/android-sdk/ndk/25b" >> ~/.buildozer/android.properties
+          echo "sdk.dir=/home/runner/.buildozer/android/platform/android-sdk" > ~/.buildozer/android.properties
+          echo "ndk.dir=/home/runner/.buildozer/android/platform/android-sdk/ndk/25b" >> ~/.buildozer/android.properties
+          
+          echo "=== SDK配置完成 ==="
+          ls -la /home/runner/.buildozer/android/platform/android-sdk/
 
       - name: Build APK
         working-directory: android_client
         env:
-          ANDROID_HOME: /opt/android-sdk
-          ANDROID_SDK_ROOT: /opt/android-sdk
+          ANDROID_HOME: /home/runner/.buildozer/android/platform/android-sdk
+          ANDROID_SDK_ROOT: /home/runner/.buildozer/android/platform/android-sdk
           HOME: /home/runner
         run: |
-          # 先确保license被接受
-          yes | /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses --sdk_root=/opt/android-sdk 2>/dev/null || true
-          
           # 创建local.properties指向我们的SDK
-          echo "sdk.dir=/opt/android-sdk" > local.properties
-          echo "ndk.dir=/opt/android-sdk/ndk/25b" >> local.properties
+          echo "sdk.dir=/home/runner/.buildozer/android/platform/android-sdk" > local.properties
+          echo "ndk.dir=/home/runner/.buildozer/android/platform/android-sdk/ndk/25b" >> local.properties
           
           # 运行buildozer
           buildozer android debug 2>&1 | tee build.log
