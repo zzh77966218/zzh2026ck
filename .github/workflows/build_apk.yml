@@ -75,7 +75,12 @@ jobs:
           unzip -q commandlinetools.zip -d $ANDROID_HOME/cmdline-tools/
           mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
           
-          # 添加到PATH
+          # 创建tools目录的符号链接，供buildozer使用
+          mkdir -p $ANDROID_HOME/tools/bin
+          ln -sf $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager $ANDROID_HOME/tools/bin/sdkmanager
+          ln -sf $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager $ANDROID_HOME/tools/bin/avdmanager
+          
+          # 添加到PATH（用于当前步骤）
           export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
           
           # 自动接受所有license
@@ -95,6 +100,7 @@ jobs:
           # 验证安装
           echo "✓ Android SDK installed"
           echo "SDK Version: $(ls $ANDROID_HOME/platforms)"
+          echo "✓ Symlinks created for buildozer compatibility"
 
       - name: Install Python dependencies
         run: |
