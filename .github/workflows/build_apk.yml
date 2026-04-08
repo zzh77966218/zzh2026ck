@@ -135,6 +135,21 @@ jobs:
           echo "🔄 Copying Android SDK..."
           cp -a $ANDROID_HOME ~/.buildozer/android/platform/android-sdk
           
+          # ⚠️ 重要：为buildozer创建sdkmanager符号链接
+          # buildozer期望在tools/bin目录中找到sdkmanager
+          SDK_PATH=~/.buildozer/android/platform/android-sdk
+          mkdir -p $SDK_PATH/tools/bin
+          
+          # 创建指向cmdline-tools的符号链接
+          if [ -f "$SDK_PATH/cmdline-tools/latest/bin/sdkmanager" ]; then
+            ln -sf $SDK_PATH/cmdline-tools/latest/bin/sdkmanager $SDK_PATH/tools/bin/sdkmanager
+            ln -sf $SDK_PATH/cmdline-tools/latest/bin/avdmanager $SDK_PATH/tools/bin/avdmanager
+            echo "✓ SDKManager symlinks created"
+          else
+            echo "⚠️  Warning: cmdline-tools/latest/bin not found"
+            ls -la $SDK_PATH/cmdline-tools/
+          fi
+          
           # 创建buildozer配置文件
           echo "sdk.dir = ~/.buildozer/android/platform/android-sdk" > ~/.buildozer/android.properties
           echo "ndk.dir = ~/.buildozer/android/platform/android-sdk/ndk/25b" >> ~/.buildozer/android.properties
