@@ -16,9 +16,6 @@ source.dir = .
 # 支持的源文件
 source.include_exts = py,png,jpg,kv,atlas,json,ttf
 
-# 需要的Python版本
-pydir_version = 3.8
-
 # 依赖库
 requirements = python3,kivy,kivymd,pillow,pyzbar,opensdl2
 
@@ -31,9 +28,6 @@ fullscreen = 0
 # Android配置
 android.permissions = INTERNET,ACCESS_NETWORK_STATE,CAMERA
 
-# Android元数据
-android.meta_data = com.google.android.gms.version=@integer/google_play_services_version
-
 # 图标（如果有的话）
 # android.icon = 
 
@@ -45,7 +39,7 @@ android.status_bar_color = #1E88E5
 
 # Android需求
 android.minapi = 21
-android.api = 29
+android.api = 34
 
 # iOS配置（不需要可以忽略）
 ios.kivy_ios_url = https://github.com/kivy/kivy-ios

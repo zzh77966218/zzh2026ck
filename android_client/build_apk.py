@@ -78,6 +78,7 @@ def init_buildozer():
 title = RemoteControl
 package.name = remotecontrol
 package.domain = com.remotectrl
+source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json,ttf
 requirements = python3,kivy,kivymd,pillow
 orientation = portrait
@@ -85,7 +86,7 @@ fullscreen = 0
 
 android.permissions = INTERNET,ACCESS_NETWORK_STATE
 android.minapi = 21
-android.api = 29
+android.api = 34
 android.landing_color = #1E88E5
 android.status_bar_color = #1E88E5
 

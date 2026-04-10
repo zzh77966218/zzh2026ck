@@ -12,6 +12,9 @@ env:
   ANDROID_HOME: /opt/android-sdk
   ANDROID_SDK_ROOT: /opt/android-sdk
   JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+  ANDROID_API_LEVEL: "34"
+  ANDROID_BUILD_TOOLS: "34.0.0"
+  ANDROID_NDK_VERSION: "25b"
   BUILDOZER_SDK_DIR: /opt/android-sdk
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -90,10 +93,10 @@ jobs:
           # 安装SDK
           echo "📥 Installing SDK components..."
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
+            "platforms;android-${ANDROID_API_LEVEL}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
             "platform-tools" \
-            "ndk;25b" \
+            "ndk;${ANDROID_NDK_VERSION}" \
             "cmake;3.22.1" \
             2>&1 | grep -E "Installing|Installed|Done|Error" || true
           
@@ -137,23 +140,23 @@ jobs:
           
           # ⚠️ 重要：为buildozer创建sdkmanager符号链接
           # buildozer期望在tools/bin目录中找到sdkmanager
-          SDK_PATH=~/.buildozer/android/platform/android-sdk
-          mkdir -p $SDK_PATH/tools/bin
-          
+          SDK_PATH="$HOME/.buildozer/android/platform/android-sdk"
+          mkdir -p "$SDK_PATH/tools/bin"
+
           # 创建指向cmdline-tools的符号链接
           if [ -f "$SDK_PATH/cmdline-tools/latest/bin/sdkmanager" ]; then
-            ln -sf $SDK_PATH/cmdline-tools/latest/bin/sdkmanager $SDK_PATH/tools/bin/sdkmanager
-            ln -sf $SDK_PATH/cmdline-tools/latest/bin/avdmanager $SDK_PATH/tools/bin/avdmanager
+            ln -sf "$SDK_PATH/cmdline-tools/latest/bin/sdkmanager" "$SDK_PATH/tools/bin/sdkmanager"
+            ln -sf "$SDK_PATH/cmdline-tools/latest/bin/avdmanager" "$SDK_PATH/tools/bin/avdmanager"
             echo "✓ SDKManager symlinks created"
           else
             echo "⚠️  Warning: cmdline-tools/latest/bin not found"
-            ls -la $SDK_PATH/cmdline-tools/
+            ls -la "$SDK_PATH/cmdline-tools/"
           fi
           
           # 创建buildozer配置文件
-          echo "sdk.dir = ~/.buildozer/android/platform/android-sdk" > ~/.buildozer/android.properties
-          echo "ndk.dir = ~/.buildozer/android/platform/android-sdk/ndk/25b" >> ~/.buildozer/android.properties
-          echo "api.level = 34" >> ~/.buildozer/android.properties
+          echo "sdk.dir = $HOME/.buildozer/android/platform/android-sdk" > ~/.buildozer/android.properties
+          echo "ndk.dir = $HOME/.buildozer/android/platform/android-sdk/ndk/${ANDROID_NDK_VERSION}" >> ~/.buildozer/android.properties
+          echo "api.level = ${ANDROID_API_LEVEL}" >> ~/.buildozer/android.properties
           
           # 验证配置
           echo "✓ buildozer configured"
@@ -165,15 +168,15 @@ jobs:
       - name: Build APK
         working-directory: android_client
         env:
-          ANDROID_HOME: ~/.buildozer/android/platform/android-sdk
-          ANDROID_SDK_ROOT: ~/.buildozer/android/platform/android-sdk
-          NDK_VERSION: 25b
+          ANDROID_HOME: ${{ format('{0}/.buildozer/android/platform/android-sdk', env.HOME) }}
+          ANDROID_SDK_ROOT: ${{ format('{0}/.buildozer/android/platform/android-sdk', env.HOME) }}
+          NDK_VERSION: ${{ env.ANDROID_NDK_VERSION }}
         run: |
           echo "🔨 Building APK..."
           
           # 创建local.properties
           echo "sdk.dir=$(realpath ~/.buildozer/android/platform/android-sdk)" > local.properties
-          echo "ndk.dir=$(realpath ~/.buildozer/android/platform/android-sdk)/ndk/25b" >> local.properties
+          echo "ndk.dir=$(realpath ~/.buildozer/android/platform/android-sdk)/ndk/${NDK_VERSION}" >> local.properties
           
           # 清理之前的构建
           rm -rf build bin dist .buildozer
